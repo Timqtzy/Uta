@@ -16,13 +16,28 @@ from dataclasses import dataclass
 from typing import Optional
 import os
 import sys
+import logging
+
+# ============== Logging Setup ==============
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "uta.log")),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("UtaBot")
 
 # ============== Load .env file if exists ==============
 def load_env():
     """Load environment variables from .env file"""
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    logger.info(f"Looking for .env at: {env_path} (exists: {os.path.exists(env_path)})")
+    logger.info(f"Working directory: {os.getcwd()}")
+    logger.info(f"Script directory: {os.path.dirname(os.path.abspath(__file__))}")
     if os.path.exists(env_path):
-        print(f"📄 Loading configuration from .env file...")
+        logger.info("Loading configuration from .env file...")
         with open(env_path, 'r') as f:
             for line in f:
                 line = line.strip()
@@ -31,6 +46,8 @@ def load_env():
                     # Remove quotes if present
                     value = value.strip().strip('"').strip("'")
                     os.environ[key.strip()] = value
+    else:
+        logger.warning(".env file NOT found — relying on environment variables")
 
 load_env()
 
@@ -38,6 +55,10 @@ load_env()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+logger.info(f"DISCORD_TOKEN loaded: {'YES (len=' + str(len(DISCORD_TOKEN)) + ')' if DISCORD_TOKEN else 'NO - MISSING'}")
+logger.info(f"SPOTIFY_CLIENT_ID loaded: {'YES' if SPOTIFY_CLIENT_ID else 'NO (optional)'}")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"discord.py version: {discord.__version__}")
 
 # ============== Validate Token ==============
 def validate_config():
@@ -71,9 +92,8 @@ def validate_config():
         print()
         sys.exit(1)
     else:
-        # Show partial token for verification
         token_preview = DISCORD_TOKEN[:20] + "..." if len(DISCORD_TOKEN) > 20 else "***"
-        print(f"✅ Discord token loaded: {token_preview}")
+        logger.info(f"Discord token loaded: {token_preview}")
 
 validate_config()
 
@@ -158,7 +178,7 @@ class YouTubeHandler:
                 None, lambda: self.ytdl.extract_info(url, download=False)
             )
         except Exception as e:
-            print(f"Error extracting info: {e}")
+            logger.error(f"Error extracting info for '{url}': {e}", exc_info=True)
             return []
 
         songs = []
@@ -210,7 +230,7 @@ class YouTubeHandler:
             )
             return data.get('url')
         except Exception as e:
-            print(f"Error getting stream URL: {e}")
+            logger.error(f"Error getting stream URL for '{url}': {e}", exc_info=True)
             return None
 
 # ============== Spotify Handler ==============
@@ -226,11 +246,11 @@ class SpotifyHandler:
                     )
                 )
                 self.enabled = True
-                print("✅ Spotify integration enabled")
+                logger.info("Spotify integration enabled")
             except Exception as e:
-                print(f"⚠️ Spotify initialization failed: {e}")
+                logger.error(f"Spotify initialization failed: {e}", exc_info=True)
         else:
-            print("ℹ️  Spotify not configured (optional - YouTube will still work)")
+            logger.info("Spotify not configured (optional - YouTube will still work)")
 
     def is_spotify_url(self, url: str) -> bool:
         return 'spotify.com' in url or 'open.spotify.com' in url
@@ -318,7 +338,7 @@ class SpotifyHandler:
                     })
 
         except Exception as e:
-            print(f"Error fetching Spotify info: {e}")
+            logger.error(f"Error fetching Spotify info for '{url}': {e}", exc_info=True)
 
         return tracks
 
@@ -348,21 +368,26 @@ class Music(commands.Cog):
         voice_client = guild.voice_client
 
         if not voice_client or not voice_client.is_connected():
+            logger.warning(f"[{guild.name}] play_next called but bot is not in a voice channel")
             return
 
         song = queue.next()
         if not song:
-            await asyncio.sleep(180)  # Wait 3 minutes before disconnecting
+            logger.info(f"[{guild.name}] Queue empty, waiting 3 minutes before disconnecting")
+            await asyncio.sleep(180)
             if not queue.current and voice_client.is_connected():
+                logger.info(f"[{guild.name}] Disconnecting due to inactivity")
                 await voice_client.disconnect()
             return
 
+        logger.info(f"[{guild.name}] Now playing: {song.title} by {song.author}")
+
         try:
-            # Get fresh stream URL
             if not song.source_url:
+                logger.info(f"[{guild.name}] Fetching stream URL for: {song.url}")
                 stream_url = await self.youtube.get_stream_url(song.url)
                 if not stream_url:
-                    # Try searching by title
+                    logger.warning(f"[{guild.name}] No stream URL, searching by title: {song.title} {song.author}")
                     songs = await self.youtube.extract_info(f"{song.title} {song.author}", search=True)
                     if songs:
                         song = songs[0]
@@ -371,20 +396,24 @@ class Music(commands.Cog):
                 stream_url = song.source_url
 
             if not stream_url:
+                logger.error(f"[{guild.name}] Could not get stream URL for '{song.title}', skipping")
                 await self.play_next(guild)
                 return
 
+            logger.info(f"[{guild.name}] Starting FFmpeg for: {song.title}")
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
 
             def after_playing(error):
                 if error:
-                    print(f"Player error: {error}")
+                    logger.error(f"[{guild.name}] Player error after '{song.title}': {error}")
+                else:
+                    logger.info(f"[{guild.name}] Finished playing: {song.title}")
                 asyncio.run_coroutine_threadsafe(self.play_next(guild), self.bot.loop)
 
             voice_client.play(source, after=after_playing)
 
         except Exception as e:
-            print(f"Error playing song: {e}")
+            logger.error(f"[{guild.name}] Exception while playing '{song.title}': {e}", exc_info=True)
             await self.play_next(guild)
 
     @commands.hybrid_command(name="join", description="Join your voice channel")
@@ -393,11 +422,18 @@ class Music(commands.Cog):
             return await ctx.send("❌ You need to be in a voice channel!")
 
         channel = ctx.author.voice.channel
+        logger.info(f"[{ctx.guild.name}] Joining voice channel: {channel.name} (requested by {ctx.author})")
 
-        if ctx.voice_client:
-            await ctx.voice_client.move_to(channel)
-        else:
-            await channel.connect()
+        try:
+            if ctx.voice_client:
+                logger.info(f"[{ctx.guild.name}] Moving to channel: {channel.name}")
+                await ctx.voice_client.move_to(channel)
+            else:
+                await channel.connect()
+                logger.info(f"[{ctx.guild.name}] Successfully connected to: {channel.name}")
+        except Exception as e:
+            logger.error(f"[{ctx.guild.name}] Failed to join voice channel '{channel.name}': {e}", exc_info=True)
+            return await ctx.send(f"❌ Failed to join: {e}")
 
         await ctx.send(f"🎵 Joined **{channel.name}**")
 
@@ -667,45 +703,70 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print()
-    print("=" * 50)
-    print(f"✅ {bot.user} is online!")
-    print(f"📊 Connected to {len(bot.guilds)} server(s)")
-    print("=" * 50)
+    logger.info("=" * 50)
+    logger.info(f"Bot logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info(f"Connected to {len(bot.guilds)} server(s): {[g.name for g in bot.guilds]}")
+    logger.info("=" * 50)
 
-    # Sync slash commands
     try:
         synced = await bot.tree.sync()
-        print(f"🔄 Synced {len(synced)} slash command(s)")
+        logger.info(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.listening,
         name="!help for commands"
     ))
+    logger.info("Bot is ready!")
 
-    print()
-    print("Bot is ready! Use !play <song> to start playing music")
-    print("=" * 50)
+
+@bot.event
+async def on_disconnect():
+    logger.warning("Bot disconnected from Discord")
+
+
+@bot.event
+async def on_resumed():
+    logger.info("Bot resumed connection to Discord")
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member == bot.user:
+        if before.channel and not after.channel:
+            logger.warning(f"Bot was disconnected from voice channel: {before.channel.name} in {before.channel.guild.name}")
+        elif not before.channel and after.channel:
+            logger.info(f"Bot joined voice channel: {after.channel.name} in {after.channel.guild.name}")
+        elif before.channel != after.channel:
+            logger.info(f"Bot moved from {before.channel.name} to {after.channel.name}")
+
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(f"❌ Missing argument: `{error.param.name}`")
     elif isinstance(error, commands.CommandNotFound):
-        pass  # Ignore unknown commands
+        pass
     else:
+        logger.error(f"Command error in '{ctx.command}' by {ctx.author}: {error}", exc_info=True)
         await ctx.send(f"❌ An error occurred: {error}")
-        print(f"Error: {error}")
 
 async def main():
     async with bot:
         await bot.add_cog(Music(bot))
+        logger.info("Music cog loaded")
         await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    print()
-    print("🎵 Discord Music Bot Starting...")
-    print()
-    asyncio.run(main())
+    logger.info("Discord Music Bot (Uta) starting...")
+    try:
+        asyncio.run(main())
+    except discord.LoginFailure:
+        logger.critical("Invalid Discord token! Check your DISCORD_TOKEN in .env")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.critical(f"Bot crashed: {e}", exc_info=True)
+        sys.exit(1)
