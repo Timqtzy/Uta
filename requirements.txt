@@ -1,0 +1,16 @@
+# Discord Music Bot Dependencies
+
+# Discord API
+discord.py[voice]>=2.3.0
+
+# YouTube downloading
+yt-dlp>=2024.1.1
+
+# Spotify API
+spotipy>=2.23.0
+
+# Audio processing (required by discord.py voice)
+PyNaCl>=1.5.0
+
+# Async support
+aiohttp>=3.9.0
